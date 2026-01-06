@@ -1,88 +1,67 @@
 ﻿import re
 import os
 from aiogram import Bot, Dispatcher, executor, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import BOT_TOKEN
-from db import add_record, get_month_stats, get_month_total
-from categories import EXPENSES, INCOME
-from voice import voice_to_text
+from db import init_db, add_record, add_learning, get_learned_category
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
+init_db()
 
-def parse_text(text):
-    text = text.lower()
-    nums = re.findall(r"\d+", text)
-    if not nums:
-        return None
-
-    amount = float(nums[0])
-
-    for c in EXPENSES:
-        if c in text:
-            return amount, c, "expense"
-
-    for c in INCOME:
-        if c in text:
-            return amount, c, "income"
-
-    return None
+category_map = {
+    "еда": ["еда", "продукты", "магазин"],
+    "алкоголь": ["алкоголь", "пиво", "вино"],
+    "авто": ["авто", "бензин", "заправка", "дт"],
+    "зарплата юг": ["юг"],
+    "зарплата чоп": ["чоп"],
+}
 
 
-@dp.message_handler(commands=["month"])
-async def month_stats(message: types.Message):
-    totals = get_month_total()
-    text = "📅 Итоги за месяц:\n\n"
-    for t, s in totals:
-        label = "Расходы" if t == "expense" else "Доходы"
-        text += f"{label}: {int(s)} ₽\n"
-    await message.answer(text)
-
-
-@dp.message_handler(commands=["stats"])
-async def category_stats(message: types.Message):
-    stats = get_month_stats()
-    if not stats:
-        await message.answer("Пока нет данных")
-        return
-
-    text = "📊 Расходы по категориям:\n\n"
-    for cat, total in stats:
-        text += f"{cat}: {int(total)} ₽\n"
-    await message.answer(text)
+@dp.message_handler(commands=["start"])
+async def start(message: types.Message):
+    await message.answer(
+        "Привет 👋\n"
+        "Просто напиши, например:\n"
+        "бензин 2500\n"
+        "Юг 50000"
+    )
 
 
 @dp.message_handler(content_types=types.ContentType.TEXT)
-async def text_handler(message: types.Message):
-    parsed = parse_text(message.text)
-    if not parsed:
-        await message.answer("Не понял. Пример: еда 450")
+async def handle_text(message: types.Message):
+    text = message.text.lower()
+
+    match = re.search(r"(\d+)", text)
+    if not match:
+        await message.answer("Не нашёл сумму. Пример: бензин 2500")
         return
 
-    amount, category, rtype = parsed
-    add_record(amount, category, rtype)
-    await message.answer(f"Записал: {category} — {amount} ₽")
+    amount = int(match.group(1))
 
+    # 1️⃣ пробуем обученные слова
+    category = get_learned_category(text)
 
-@dp.message_handler(content_types=types.ContentType.VOICE)
-async def voice_handler(message: types.Message):
-    file = await bot.get_file(message.voice.file_id)
-    path = f"voice_{message.message_id}.ogg"
-    await bot.download_file(file.file_path, path)
+    # 2️⃣ пробуем словарь
+    if not category:
+        for cat, keys in category_map.items():
+            if any(k in text for k in keys):
+                category = cat
+                break
 
-    text = voice_to_text(path)
-    os.remove(path)
+    # 3️⃣ если всё равно не поняли — спрашиваем
+    if not category:
+        kb = InlineKeyboardMarkup(row_width=2)
+        for cat in category_map.keys():
+            kb.add(
+                InlineKeyboardButton(
+                    text=cat,
+                    callback_data=f"learn:{cat}:{text}"
+                )
+            )
 
-    parsed = parse_text(text)
-    if not parsed:
-        await message.answer(f"Распознал: {text}\nНо не понял запись.")
-        return
-
-    amount, category, rtype = parsed
-    add_record(amount, category, rtype)
-    await message.answer(f"🎤 {text}\nЗаписал: {category} — {amount} ₽")
-
-
-if __name__ == "__main__":
-    executor.start_polling(dp)
+        await message.answer(
+            "Я не уверен в категории. Выбери один раз — я запомню 👇",
